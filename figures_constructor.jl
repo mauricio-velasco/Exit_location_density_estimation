@@ -14,7 +14,7 @@ function negative_laplacian(p)
     return((-1)*sum(list))
 end
 
-function Brownian_Infinitesimal_Op(p)
+function Brownian_infinitesimal_operator(p)
     #this function implements the differential operator L for Brownian motion, which is negative ONE HALF of the laplacian
     list = []
     vars = variables(p)

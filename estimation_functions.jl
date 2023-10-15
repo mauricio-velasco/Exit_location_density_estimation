@@ -2,8 +2,23 @@ using DynamicPolynomials
 using CSDP
 using SumOfSquares
 using JuMP
+using LinearAlgebra
+import MultivariatePolynomials.degree
+import Base.real
+
+function real(p)
+    #returns the real part of a mult
+    coeffs = Array{Float64}(real(p.a))
+    return DynamicPolynomials.Polynomial(coeffs,p.x)
+end
 
 
+function degree(q)
+    #Extends the functionality of MultivariatePolynomials
+    D = [degree(m) for m in monomials(q)]
+    return maximum(D)
+end
+    
 function create_model_moments_stopping_time_unit_sphere_v2(space_vars_vector, approximation_degree_r, initial_condition, target_g, differential_operator_L, upper_or_lower)
     # Given:
     # ambient space variables space_vars_vector
@@ -26,7 +41,7 @@ function create_model_moments_stopping_time_unit_sphere_v2(space_vars_vector, ap
     model = SOSModel(solver);
     allmons = DynamicPolynomials.monomials(x, 0:r)
     #We make our main variable
-    @variable(model, V, SumOfSquares.Poly(allmons))
+    @variable(model, V, SumOfSquares.Poly(allmons))#this says that the variable is of class Poly as defined in the sum of squares package
     #And define the objective function
     if upper_or_lower == "lower_bound"
         @objective(model, Max, V(x=>initial_condition))
@@ -91,8 +106,8 @@ function compute_moments_array_stopping_time_unit_sphere(space_vars_vector, targ
     return bounds
 end
 
-function compute_certified_exit_location_moments(space_vars_vector, target_functions_list, differential_operator_L, initial_location, error_tolerance, maximum_allowed_degree_increases = 5)
-    # Useful function 1:
+function compute_certified_exit_location_moments(space_vars_vector, target_functions_list, differential_operator_L, initial_location, error_tolerance, maximum_allowed_degree_increases = 40)
+    # USEFUL FUNCTION 1:
     # Given:
     # ambient space variables space_vars_vector
     # a list of target polynomials in the ambient space variables called target_functions_list
@@ -135,7 +150,34 @@ function compute_certified_exit_location_moments(space_vars_vector, target_funct
     return upper_bounds, lower_bounds
 end
 
+
 function create_monomial_basis_on_sphere(space_vars_vector, degree_limit_d)
+    #Temporary attempt for building Tchebyshev basis in 2D
+    # Creates a list of monomials in the variables of space_vars_vector of degree at most degree_limit_d
+    # which a basis for the coordinate ring of a sphere in degrees at most degree_limit_d
+    n = length(space_vars_vector)
+    @assert(n==2)#this temporary function works only for 2D
+    d = degree_limit_d
+    x = space_vars_vector
+    z = x[1:n-1]
+    basis_as_List = [1.0*x[1]^0+0.0]
+    p=x[1]+im*x[2]
+    q=x[1]+im*x[2]
+
+    for k in 1:degree_limit_d
+        cos_part = real((p^k+q^k)/2)
+        push!(basis_as_List, cos_part)
+        sin_part = real((p^k+q^k)/(2*im))
+        push!(basis_as_List, sin_part)
+    end
+    l = length(basis_as_List)
+    @assert(l==binomial(n+d,d)-binomial(n+d-2,d-2))
+    return basis_as_List
+end
+
+
+
+function good_create_monomial_basis_on_sphere(space_vars_vector, degree_limit_d, rotation_angle=pi/4)
     # Creates a list of monomials in the variables of space_vars_vector of degree at most degree_limit_d
     # which a basis for the coordinate ring of a sphere in degrees at most degree_limit_d
     n = length(space_vars_vector)
@@ -148,6 +190,13 @@ function create_monomial_basis_on_sphere(space_vars_vector, degree_limit_d)
     basis_as_List = vcat(mons_with_last_once, mons_no_last)
     l = length(basis_as_List)
     @assert(l==binomial(n+d,d)-binomial(n+d-2,d-2))
+    if n>=2
+        #We rotate the first two components of every element of the basis by pi/4 whenever the dimension allows
+        #This improves the condition number of the moment matrix in our examples
+        alpha = rotation_angle
+        rotated_basis_as_List = [subs(p,x[1]=>cos(alpha)*x[1]-sin(alpha)*x[2],x[2]=>sin(alpha)*x[1]+cos(alpha)*x[2]) for p in basis_as_List]
+        basis_as_List = rotated_basis_as_List
+    end
     return basis_as_List
 end
 
@@ -201,6 +250,54 @@ function compute_moment_matrix(degree_limit_d, space_vars_vector,  differential_
 end
 
 
+function compute_certified_moment_matrix(degree_limit_d, space_vars_vector,  differential_operator_L, initial_condition, required_error_bound)
+    #Given:
+    # a degree_limit_d
+    # a vector of ambient space variables space_vars_vector
+    # an implementation of the differential operator of the process
+    # an initial condition
+    # a required error bound
+    
+    #Computes: 
+    # a basis f_i for polynomials of degree at most degree_limit_d
+    # the PSD matrix M of moments E_{\nu}[f_if_j], whose entries are 
+    # obtained by averaging the lower and upper bounds resulting from our optimization
+    # and the maxgap, equal to the largest gap between any lower and upper bound
+    # for the matrix entries.
+    
+    n = length(space_vars_vector)
+    d = degree_limit_d
+    basis_as_List = create_monomial_basis_on_sphere(space_vars_vector, degree_limit_d)    
+    l = length(basis_as_List)
+    M = zeros(l,l)
+    #N = Array{Monomial{true}}(undef,l,l)
+    maxgap = 0.0
+    for i in 1:l
+        for j in i:l
+                print( "Calculando item "*string(i)*","*string(j)*" de "*string(l)*" cuadrado.\n")
+                g_1 = basis_as_List[i]
+                g_2 = basis_as_List[j]
+                if j==i
+                    target_functions_list = [(g_1*g_2)/2]
+                else
+                    target_functions_list = [g_1*g_2]
+                end
+                error_tolerance = required_error_bound                
+                lower_bounds, upper_bounds = compute_certified_exit_location_moments(space_vars_vector, target_functions_list, differential_operator_L, initial_location, error_tolerance)
+                M[i,j] = (lower_bounds[1] + upper_bounds[1])/2
+                gap = abs(upper_bounds[1]-lower_bounds[1])
+                if maxgap <  gap
+                    maxgap = gap
+                end
+        end
+    end
+    M = M+transpose(M)
+    return maxgap, M        
+end
+
+
+
+
 function compute_normalized_Christoffel_Function(degree_limit_d,space_vars_vector, differential_operator_L, initial_condition,approximation_degree_r)
     # Given:
     # a degree_limit_d of functions which we want to estimate
@@ -208,18 +305,46 @@ function compute_normalized_Christoffel_Function(degree_limit_d,space_vars_vecto
     # an implementation of the differential operator of the process
     # an initial location for the process.
     
-    # Computes the normalized Christoffel function (which, under suitable conditions converges to the exit time density)
+    # Computes the normalized Christoffel function ON THE UNIT SPHERE (which, under suitable conditions converges to the exit time density).
     # The resulting function can be evaluated via: normalizedChristoffel(x=>[1.0,0.0])
     # It also returns the maxgap between obtained upper and lower bounds 
     # giving qualitative guarantees for the moment estimation.
-    maxgap, M = compute_moment_matrix(degree_limit_d,space_vars_vector, differential_operator_L, initial_condition,approximation_degree_r)
+    maxgap, M = compute_moment_matrix(degree_limit_d,space_vars_vector, differential_operator_L, initial_condition, approximation_degree_r)
     basis = create_monomial_basis_on_sphere(space_vars_vector,degree_limit_d)
+    M = Matrix{Float64}(M)
     l = length(basis)
     A = inv(M)
     K = transpose(basis)*A*basis
-    normalizedChristoffel = l/K
+    normalizedChristoffel = l/(K*2*pi)
     return maxgap, normalizedChristoffel    
 end
+
+
+function compute_certified_exit_density_estimation(degree_limit_d,space_vars_vector, differential_operator_L, initial_condition, required_error_bound)
+    #USEFUL FUNCTION 2:
+    # Given:
+    # a degree_limit_d of functions whose moments we want to estimate
+    # a vector of ambient space variables space_vars_vector
+    # an implementation of the differential operator of the process
+    # an initial location for the process.
+    # A required error bound. The algorithm will continue to compute until this error bound is met
+    
+    # Computes the normalized Christoffel function (which, under suitable conditions converges to the exit time density) on the unit sphere
+    # The resulting function can be evaluated via the output with the syntax: normalizedChristoffel(x=>[1.0,0.0])
+    # It also returns the maxgap between obtained upper and lower bounds 
+    # giving qualitative guarantees for the moment estimation.
+    maxgap, M = compute_certified_moment_matrix(degree_limit_d,space_vars_vector, differential_operator_L, initial_condition, required_error_bound)
+    basis = create_monomial_basis_on_sphere(space_vars_vector, degree_limit_d)
+    M = Matrix{Float64}(M)
+    l = length(basis)
+    moments_condition_number = cond(M)
+    A = inv(M)
+    K = transpose(basis)*A*basis
+    normalizedChristoffel = l/(K*2*pi)
+    return moments_condition_number, maxgap, normalizedChristoffel    
+end
+
+
 
 #The following functions can be used to estimate the density of the occupation measure 
 #of our diffusion in the unit ball.
